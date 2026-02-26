@@ -1,0 +1,73 @@
+name: Tennis Court Sniper
+
+# ─── Triggers ────────────────────────────────────────────────────────────────
+on:
+  schedule:
+    # GitHub cron is UTC.  Melbourne = UTC+11 (AEDT, Oct–Apr) / UTC+10 (AEST).
+    # 6:45 AM UTC  =  5:45 PM AEDT  /  4:45 PM AEST
+    # Starts ~15 min early to absorb GitHub's cron delay (can be 3–15 min).
+    - cron: "45 6 * * *"
+
+  # Let you click "Run workflow" in the GitHub UI any time
+  workflow_dispatch: {}
+
+# ─── Environment ─────────────────────────────────────────────────────────────
+env:
+  TZ: Australia/Melbourne          # all datetime.now() calls use Melbourne time
+  PLAYWRIGHT_BROWSERS_PATH: /home/runner/.cache/ms-playwright
+
+# ─── Job ─────────────────────────────────────────────────────────────────────
+jobs:
+  snipe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240            # safety cap (session is ~3.5 hours max)
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Python ────────────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip                 # caches pip downloads between runs
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      # ── Playwright (cached) ──────────────────────────────────────────
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: /home/runner/.cache/ms-playwright
+          key: pw-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium + OS deps
+        run: playwright install --with-deps chromium
+
+      # ── Run the scheduler ────────────────────────────────────────────
+      - name: Snipe tennis courts
+        env:
+          TW_EMAIL:    ${{ secrets.TW_EMAIL }}
+          TW_PASSWORD: ${{ secrets.TW_PASSWORD }}
+        run: python scheduler.py --test-now
+
+      # ── Upload debug artifacts on failure ─────────────────────────────
+      - name: Upload screenshots (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: "*.png"
+          retention-days: 3
+
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: "*.log"
+          retention-days: 7

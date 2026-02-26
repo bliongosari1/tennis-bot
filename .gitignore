@@ -1,0 +1,7 @@
+.env
+*.log
+*.png
+__pycache__/
+.venv/
+node_modules/
+scheduler_state.json
