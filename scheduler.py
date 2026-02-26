@@ -331,8 +331,16 @@ def run_scheduler(headless=True, test_now=False):
                     time.sleep(60)
                     continue
 
-                # Pre-navigate to booking page for the first club
-                open_booking_page(page, CLUBS[0], target_date)
+                # Pre-navigate to booking page for the first club/zone
+                first_club = CLUBS[0]
+                first_zone = first_club.get("zones", [{"zoneTypeId": 32, "label": ""}])[0]
+                open_booking_page(
+                    page,
+                    first_club["clubId"],
+                    first_zone["zoneTypeId"],
+                    target_date,
+                    first_zone.get("label", ""),
+                )
 
                 # Run the evening session
                 booked = run_evening_session(page, target_date, headless)
