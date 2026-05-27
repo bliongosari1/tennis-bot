@@ -1,6 +1,6 @@
 # Base image ships with Chromium + all OS deps pre-installed.
 # Pinned to a recent version that matches our requirements.txt.
-FROM mcr.microsoft.com/playwright/python:v1.49.1-noble
+FROM mcr.microsoft.com/playwright/python:v1.60.0-noble
 
 WORKDIR /app
 
