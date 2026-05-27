@@ -44,18 +44,44 @@ _h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s")
 log.addHandler(_h)
 
 
-def _visible_times(page, preferred_times: list[str]) -> list[str]:
+def _visible_times(page, preferred_times: list[str], target_date: str) -> list[str]:
     """
-    Return the subset of preferred_times for which a 'Book now' button is
-    currently visible on the page (i.e. the slot is bookable right now).
+    Return the subset of preferred_times that are bookable on *target_date*
+    (YYYY-MM-DD).  The page shows a 7-day grid so we filter to the column
+    whose header matches target_date.
+    """
+    from book import _target_day_dm
+    day_dm = _target_day_dm(target_date)
 
-    Uses the SAME spatial-matching logic as book.JS_FIND_AND_MARK_SLOT —
-    a time only counts as available if there is a 'Book now' button
-    directly below it within the same cell card.
-    """
     return page.evaluate(
-        """(times) => {
-            // Gather visible time elements whose direct text is a target time.
+        """([times, targetDayDM]) => {
+            function normaliseDM(s) {
+                const m = s.match(/(\\d{1,2})\\/(\\d{1,2})/);
+                if (!m) return null;
+                return `${parseInt(m[1],10)}/${parseInt(m[2],10)}`;
+            }
+            const wantDM = normaliseDM(targetDayDM);
+
+            // Find the column for our target day, if any.
+            let column = null;
+            document.querySelectorAll('div, span, th, td').forEach(el => {
+                if (el.offsetParent === null) return;
+                const txt = (el.innerText || '').trim().replace(/\\s+/g, ' ');
+                if (!/^(SUN|MON|TUE|WED|THU|FRI|SAT)[A-Z]*\\s*\\d{1,2}\\/\\d{1,2}$/i
+                      .test(txt)) return;
+                if (normaliseDM(txt) !== wantDM) return;
+                const r = el.getBoundingClientRect();
+                if (r.height < 10 || r.height > 100 || r.width < 50) return;
+                column = {left: r.left, right: r.right};
+            });
+
+            const inColumn = (r) => {
+                if (!column) return true;
+                const xMid = (r.left + r.right) / 2;
+                return xMid >= column.left - 10 && xMid <= column.right + 10;
+            };
+
+            // Gather visible time elements in the target column.
             const timeBoxes = [];
             const walker = document.createTreeWalker(
                 document.body, NodeFilter.SHOW_ELEMENT
@@ -69,12 +95,12 @@ def _visible_times(page, preferred_times: list[str]) -> list[str]:
                     .join(' ').trim();
                 if (!times.includes(ownText)) continue;
                 const r = el.getBoundingClientRect();
-                if (r.width > 0 && r.height > 0) {
+                if (r.width > 0 && r.height > 0 && inColumn(r)) {
                     timeBoxes.push({label: ownText, r});
                 }
             }
 
-            // Gather visible Book now buttons.
+            // Gather Book now buttons in the target column.
             const bookBoxes = [];
             document.querySelectorAll('button, a, [role="button"], div, span')
                 .forEach(el => {
@@ -86,11 +112,13 @@ def _visible_times(page, preferred_times: list[str]) -> list[str]:
                     if (own !== 'Book now') return;
                     const r = el.getBoundingClientRect();
                     if (r.width < 30 || r.height < 12) return;
+                    if (!inColumn(r)) return;
                     bookBoxes.push(r);
                 });
 
-            // A time is bookable iff some Book now button is directly below
-            // it within the same cell card (MAX_DY px, horizontally aligned).
+            // Pair: Book button directly below the time within ~160 px,
+            // overlap ≥ 30% of the narrower of the two (button is often
+            // narrower than the big time text but still inside the cell).
             const MAX_DY = 160;
             const found = new Set();
             for (const {label, r: tr} of timeBoxes) {
@@ -100,14 +128,15 @@ def _visible_times(page, preferred_times: list[str]) -> list[str]:
                     if (dy < -10 || dy > MAX_DY) continue;
                     const overlap =
                         Math.min(tr.right, br.right) - Math.max(tr.left, br.left);
-                    if (overlap < tr.width * 0.3) continue;
+                    const minWidth = Math.min(tr.width, br.width);
+                    if (overlap < minWidth * 0.3) continue;
                     found.add(label);
                     break;
                 }
             }
             return Array.from(found);
         }""",
-        preferred_times,
+        [preferred_times, day_dm],
     )
 
 
@@ -157,7 +186,7 @@ def find_opportunities(headless: bool = True) -> list[dict]:
                             f"  skip {club['name']}/{zone['label']}/{date_str}: {exc}"
                         )
                         continue
-                    free = _visible_times(page, preferred)
+                    free = _visible_times(page, preferred, date_str)
                     for tm in free:
                         out.append({
                             "date":     date_str,

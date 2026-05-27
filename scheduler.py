@@ -198,7 +198,7 @@ def snipe_one_slot(page, primary_time, target_date, fallback_times, booked_clubs
             open_booking_page(page, club["clubId"], zone_id, target_date, zone_label)
 
             for t in times_to_try:
-                if not click_book_now(page, t):
+                if not click_book_now(page, t, target_date):
                     continue
 
                 result = handle_booking_flow(page)

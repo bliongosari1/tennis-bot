@@ -176,17 +176,49 @@ log.addHandler(_fh)
 # JavaScript helpers (injected into the page)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Find the "Book now" button that belongs to a given time slot using
-# spatial matching — the Book button must be DIRECTLY BELOW the time
-# text and horizontally aligned with it.  Walking up the DOM is unreliable
-# because a row of cells (one per day) shares ancestors, so an unbookable
-# slot's time element can end up matched to a neighbour cell's Book button.
+# Find the "Book now" button that belongs to a given time slot AND a given
+# target date (DD/MM, e.g. "29/05").  The page shows a 7-day grid so we
+# must filter to the target day's column first — otherwise a missing slot
+# on the target day silently matches a different day's cell.
 JS_FIND_AND_MARK_SLOT = """
-(targetTime) => {
+([targetTime, targetDayDM]) => {
     document.querySelectorAll('[data-twbot]')
         .forEach(e => e.removeAttribute('data-twbot'));
 
-    // Collect every visible element whose direct text is the target time.
+    // Find the day-header element whose text matches "<DAYNAME> <D/M>".
+    // We accept any leading-zero variant: "1/06" or "01/06" both match
+    // "1/6" → strip leading zeros on both sides before comparing.
+    function normaliseDM(s) {
+        const m = s.match(/(\\d{1,2})\\/(\\d{1,2})/);
+        if (!m) return null;
+        return `${parseInt(m[1],10)}/${parseInt(m[2],10)}`;
+    }
+    const wantDM = normaliseDM(targetDayDM);
+    if (!wantDM) return false;
+
+    let column = null;   // {left, right}
+    document.querySelectorAll('div, span, th, td').forEach(el => {
+        if (el.offsetParent === null) return;
+        const txt = (el.innerText || '').trim();
+        if (!/^(SUN|MON|TUE|WED|THU|FRI|SAT)[A-Z]*\\s*\\n?\\s*\\d{1,2}\\/\\d{1,2}$/i
+              .test(txt.replace(/\\s+/g, ' '))) return;
+        const got = normaliseDM(txt);
+        if (got !== wantDM) return;
+        const r = el.getBoundingClientRect();
+        if (r.height < 10 || r.height > 100 || r.width < 50) return;
+        column = {left: r.left, right: r.right};
+    });
+
+    // No header found at all → fall back to no-column-filter so single-day
+    // views (e.g. mobile) still work.
+    const inColumn = (r) => {
+        if (!column) return true;
+        const xMid = (r.left + r.right) / 2;
+        return xMid >= column.left - 10 && xMid <= column.right + 10;
+    };
+
+    // Visible time elements whose direct text is the target time AND
+    // (when a column is known) sit inside the target day's column.
     const timeBoxes = [];
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
     while (walker.nextNode()) {
@@ -198,14 +230,14 @@ JS_FIND_AND_MARK_SLOT = """
             .join(' ').trim();
         if (ownText === targetTime) {
             const r = el.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0) {
+            if (r.width > 0 && r.height > 0 && inColumn(r)) {
                 timeBoxes.push({el, r});
             }
         }
     }
     if (timeBoxes.length === 0) return false;
 
-    // Collect every visible "Book now" button on the page.
+    // Same column filter for the Book now buttons.
     const bookBoxes = [];
     document.querySelectorAll('button, a, [role="button"], div, span')
         .forEach(el => {
@@ -217,25 +249,24 @@ JS_FIND_AND_MARK_SLOT = """
             if (own !== 'Book now') return;
             const r = el.getBoundingClientRect();
             if (r.width < 30 || r.height < 12) return;
+            if (!inColumn(r)) return;
             bookBoxes.push({el, r});
         });
     if (bookBoxes.length === 0) return false;
 
-    // For each time element, find the Book button that is BELOW it,
-    // horizontally overlapping (same cell), and closest in vertical distance.
-    // A real cell card is roughly 100–160 px tall — anything further is
-    // a different cell or the wrong row.
+    // Pair: Book button must sit directly below the time, in the same cell card.
+    // Overlap must be at least 30% of the NARROWER element (the button is
+    // often narrower than the big blue time text but still inside the cell).
     const MAX_DY = 160;
-
     for (const {el: timeEl, r: tr} of timeBoxes) {
         let best = null;
         let bestDy = Infinity;
         for (const {el: bookEl, r: br} of bookBoxes) {
             const dy = br.top - tr.bottom;
             if (dy < -10 || dy > MAX_DY) continue;
-            // Require horizontal overlap of at least 30% of the time element.
             const overlap = Math.min(tr.right, br.right) - Math.max(tr.left, br.left);
-            if (overlap < tr.width * 0.3) continue;
+            const minWidth = Math.min(tr.width, br.width);
+            if (overlap < minWidth * 0.3) continue;
             if (dy < bestDy) {
                 bestDy = dy;
                 best = bookEl;
@@ -249,6 +280,12 @@ JS_FIND_AND_MARK_SLOT = """
     return false;
 }
 """
+
+
+def _target_day_dm(date_str: str) -> str:
+    """2026-05-29 → '29/5' for matching the page's day-header text."""
+    d = datetime.strptime(date_str, "%Y-%m-%d")
+    return f"{d.day}/{d.month}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Core logic
@@ -364,12 +401,17 @@ def _is_zone_allowed(zone_name):
 
 
 
-def click_book_now(page, target_time):
+def click_book_now(page, target_time, target_date=None):
     """
-    Find a 'Book now' button for *target_time* on the grid, and click it.
+    Find a 'Book now' button for *target_time* on *target_date* (YYYY-MM-DD)
+    and click it.  The date filter is essential — the page shows a 7-day
+    grid, so without it the spatial matcher could pick a Book button in
+    a different day's column.
+
     Returns True if a button was found and clicked.
     """
-    found = page.evaluate(JS_FIND_AND_MARK_SLOT, target_time)
+    day_dm = _target_day_dm(target_date) if target_date else ""
+    found = page.evaluate(JS_FIND_AND_MARK_SLOT, [target_time, day_dm])
     if not found:
         return False
 
@@ -377,7 +419,7 @@ def click_book_now(page, target_time):
     btn.scroll_into_view_if_needed()
     page.wait_for_timeout(500)
     btn.click()
-    log.info(f"    Clicked 'Book now' for {target_time}")
+    log.info(f"    Clicked 'Book now' for {target_time} on {target_date}")
     return True
 
 
@@ -633,7 +675,7 @@ def attempt_booking(
                         tag = f" [{zone_label}]" if zone_label else ""
                         log.info(f"  Trying {slot_time} at {club['name']}{tag} ...")
 
-                        if not click_book_now(page, slot_time):
+                        if not click_book_now(page, slot_time, date_str):
                             log.info(f"    No available slot for {slot_time}")
                             continue
 
