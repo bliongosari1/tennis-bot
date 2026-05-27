@@ -44,8 +44,10 @@ import telegram_poller  # noqa: E402
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ALLOWED_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-# A small thread pool — Playwright eats memory, max 2 concurrent jobs.
-executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tw-cmd")
+# Serial worker — running two Playwright browsers in parallel on a 1 GB VM
+# causes CPU contention, JS evals time out, and click_book_now misses slots
+# it would otherwise see.  Commands queue and run one at a time.
+executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tw-cmd")
 
 
 # ─── Telegram long-polling ─────────────────────────────────────────────────

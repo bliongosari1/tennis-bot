@@ -415,11 +415,31 @@ def click_book_now(page, target_time, target_date=None):
     grid, so without it the spatial matcher could pick a Book button in
     a different day's column.
 
+    Retries once with a page reload if the first JS evaluation finds
+    nothing — this catches transient render glitches (CPU contention on
+    Fly, slow Albert pages, etc.) so we don't claim a slot is gone when
+    it's actually just not painted yet.
+
     Returns True if a button was found and clicked.
     """
     day_dm = _target_day_dm(target_date) if target_date else ""
-    found = page.evaluate(JS_FIND_AND_MARK_SLOT, [target_time, day_dm])
-    if not found:
+
+    for attempt in (1, 2):
+        found = page.evaluate(JS_FIND_AND_MARK_SLOT, [target_time, day_dm])
+        if found:
+            break
+        if attempt == 1:
+            # Retry: maybe the grid wasn't fully rendered yet.
+            log.info(
+                f"    {target_time}: not found on first try, "
+                f"reloading and retrying ..."
+            )
+            try:
+                page.reload(wait_until="networkidle", timeout=15_000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2500)
+    else:
         return False
 
     btn = page.locator('[data-twbot="1"]').first
@@ -478,6 +498,16 @@ def handle_booking_flow(page):
             log.info(f"    Selected product: {product_text}")
             page.wait_for_timeout(800)
             break
+
+    # ── Detect PAID extra-time products (Albert afternoon, etc.) ─────
+    # If the modal shows "Pay now ($X)" or "Add to cart", this is NOT a
+    # free member booking — the slot needs a paid product purchase.
+    # Treat this as a distinct outcome so the caller knows the slot
+    # exists but isn't free, instead of a generic "error".
+    if re.search(r"Pay now\s*\(\$", page_text) or "Add to cart" in page_text:
+        log.warning("    Slot requires a paid extra-time product — skipping")
+        _dismiss_modal(page)
+        return "paid"
 
     # ── Click the "Book" confirmation button ────────────────────────
     book_clicked = _click_element(page, "Book")
@@ -711,6 +741,13 @@ def attempt_booking(
                             log.info("  Skipping remaining (window not open yet)")
                             too_soon_hit = True
                             break
+
+                        if result == "paid":
+                            log.info(
+                                f"    {slot_time} at {club['name']}{tag} "
+                                f"is a paid extra-time slot — skipping"
+                            )
+                            continue
 
                         # result == "error" → try next time slot
                         continue
