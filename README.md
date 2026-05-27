@@ -1,265 +1,158 @@
 # Tennis World Auto-Booker
 
-Automatically books tennis courts at **Tennis World** (Melbourne Park / Albert Park).
-Targets slots **5 days in advance**, preferring **8 PM** and trying the **6–9 PM** range.
+Snipes free tennis courts at **Tennis World Melbourne Park** and
+**Albert Reserve** the second they become available, plus a Telegram bot for
+viewing, sniping on-demand, and cancelling — all running as a single
+always-on Fly.io process.
 
-## How it works
+## What it books
 
-Slots open **exactly 5 days before the session time**. So a 6:00 PM Friday slot
-becomes bookable at 6:00 PM Sunday, a 6:30 PM slot at 6:30 PM, etc.
-
-There are **two modes**:
-
-| | `book.py` | `scheduler.py` |
+| Day you book | Target session | Slot priority |
 |---|---|---|
-| **Purpose** | One-shot booking attempt | Competitive daily sniper |
-| **Speed** | Logs in fresh each run | Pre-logged-in, fires at the exact second |
-| **Best for** | Quick manual test | Running every day automatically |
+| Wed–Sun (booking weekdays) | **Evening** 7–9 PM | 8 PM → 8:30 → 7:30 → 7:00 → 9:00 |
+| Mon–Tue (booking weekend) | **Morning** 10–12 PM | 11 AM → 10 AM → 12 PM |
 
-## Deploy free on GitHub Actions (recommended)
+- Books **5 days in advance** at the exact minute slots open.
+- Tries Melbourne Park first (4 free zones), Albert Reserve as fallback.
+- Multi-venue: books up to 1 hour per venue per day (so up to 2 bookings/day).
 
-This runs the sniper every day on GitHub's servers — your laptop can be off.
+All knobs live in `settings.py` — edit one file and book/scheduler/scanner all pick up the change.
 
-### 1. Create a public GitHub repo
+## Telegram bot
+
+Add your bot to a group, set the secrets, and you get:
+
+| Pattern | Example | What it does |
+|---|---|---|
+| `/list` | | upcoming bookings with cancel commands |
+| `/summary` | | today + next 3 days |
+| `/scan` | | live scan for free preferred slots |
+| `/settings` | | dump current config |
+| `/snipe_today` | | try to book today |
+| `/snipe_tomorrow` | | try to book tomorrow |
+| `/snipe_<day>` | `/snipe_fri` | try next Friday |
+| `/snipe_<date>` | `/snipe_2026-05-29` | try a specific date |
+| `/snipe_<when>_<time>` | `/snipe_tomorrow_8:30am` | try a specific date+time |
+| `/cancel_next` | | cancel the soonest booking |
+| `/cancel_<day>_<time>` | `/cancel_mon_2030`, `/cancel_fri_7pm` | cancel by day + time |
+| `/cancel_<date>_<time>` | `/cancel_20260525_2030` | cancel by ISO date + time |
+| `/ping`, `/help` | | health check, help text |
+
+Plus automatic messages:
+
+- **Instant** when a booking succeeds
+- **Daily 8 AM** summary of today + next 3 days, with tappable cancel buttons
+- **Every 15 min** (waking hours) if the scanner finds a new free slot from someone's cancellation
+
+> ⚠️ Tennis World charges if you cancel **less than 6 hours** before the booking.
+> The bot does NOT enforce this — it'll cancel whenever you ask.
+
+## Tennis World booking rules (the gotchas)
+
+These are server-side rules, not bot bugs:
+
+1. **5-day window.** Slots open exactly 5 days ahead at the same wall-clock time. Trying to book 1–4 days ahead returns "Too soon to book".
+2. **Second-hour rule.** If you already have a booking on day X, adding another booking on day X is treated as a "second hour" and is blocked unless the new slot is within 24 h.
+3. **Spatial matching.** A time can appear on the calendar without a "Book now" button (already booked by someone else). The bot uses spatial matching — the Book button must be in the same cell card as the time — to avoid grabbing a neighbour cell's button by mistake.
+
+## Hosting — Fly.io
+
+Single always-on machine in `syd`, running `fly_main.py`:
+
+```
+fly_main.py (single Python process)
+├── Telegram long-poll loop          ← ~1 s response to commands
+├── ThreadPoolExecutor (max 2)        ← Playwright workers
+└── APScheduler (BackgroundScheduler) ← cron jobs:
+        • evening sniper  Wed–Sun 18:30 Melb
+        • morning sniper  Mon–Tue 09:30 Melb
+        • daily summary   every day 08:00 Melb
+        • scanner         every 15 min, 07:00–22:59 Melb
+```
+
+### Why Fly and not GH Actions
+
+GitHub Actions cron is unreliable for low-latency Telegram interaction (5-min minimum + GH skips ticks under load), and a billing failure on the account disables Actions entirely — even on public repos. Fly.io's free allowance comfortably covers a single 1 GB always-on machine.
+
+### Deploy
 
 ```bash
-cd /Users/brandonvincent/Documents/personal/tennis-booker
+# One-time setup
+fly auth login
+fly apps create tennis-booker --org personal
+fly secrets set TW_EMAIL=... TW_PASSWORD=... \
+    TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=...
 
-# Make sure .env is NOT committed (it's in .gitignore)
-git add -A
-git commit -m "tennis booking bot"
-
-# Create the repo on GitHub (requires gh CLI)
-gh repo create tennis-booker --public --source=. --push
+# Each deploy
+fly deploy --ha=false
+fly logs        # tail
+fly status      # see the running machine
+fly machine start <id>   # if Fly stopped it after a deploy
 ```
 
-Or create the repo manually at https://github.com/new, then:
-```bash
-git remote add origin https://github.com/YOUR_USERNAME/tennis-booker.git
-git push -u origin main
-```
+### Important: delete the Telegram webhook if you ever set one
 
-> **Public repo = unlimited free GitHub Actions minutes.**
-> Your credentials are NOT in the code — they go in GitHub Secrets (next step).
-
-### 2. Add your credentials as GitHub Secrets
-
-Go to your repo on GitHub → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
-
-| Secret name | Value |
-|---|---|
-| `TW_EMAIL` | `brandonvincent567@gmail.com` |
-| `TW_PASSWORD` | `Tennis123` |
-
-Or via CLI:
-```bash
-gh secret set TW_EMAIL --body "brandonvincent567@gmail.com"
-gh secret set TW_PASSWORD --body "Tennis123"
-```
-
-### 3. Done — it runs automatically every day
-
-The workflow fires at **~5:45 PM Melbourne time** daily. It:
-1. Boots up a cloud machine
-2. Installs everything (~1 min, cached after first run)
-3. Logs in and waits for each slot time (6:00, 6:30, ..., 9:00 PM)
-4. Snipes the instant each slot opens
-5. Uploads logs as artifacts you can download from the Actions tab
-
-### Test it now (manual trigger)
-
-Go to your repo → **Actions** tab → **Tennis Court Sniper** → **Run workflow** → click the green button.
-
-### Check results
-
-Go to **Actions** tab → click the latest run → see live logs, or download the `logs` artifact.
-
----
-
-## Quick setup (local)
+Long-polling and webhook are mutually exclusive. If `getWebhookInfo` shows a URL, the long-poll loop will quietly fail:
 
 ```bash
-cd tennis-booker
-
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install Python dependencies
-pip install -r requirements.txt
-
-# Install the Chromium browser for Playwright
-playwright install chromium
+curl -F "url=" "https://api.telegram.org/bot<TOKEN>/setWebhook"
 ```
 
-Your credentials are already in `.env`. Double-check they're correct:
-
-```
-TW_EMAIL=brandonvincent567@gmail.com
-TW_PASSWORD=Tennis123
-```
-
----
-
-## Option 1: Competitive scheduler (recommended)
-
-`scheduler.py` is built for speed. It:
-
-1. Wakes up at **5:57 PM** daily
-2. **Logs in and pre-navigates** to the booking page before 6:00 PM
-3. At **exactly 6:00:00 PM** → snipes the 6:00 PM slot (just opened!)
-4. At **exactly 6:30:00 PM** → snipes the 6:30 PM slot
-5. At **exactly 7:00:00 PM** → snipes the 7:00 PM slot
-6. ... continues through **9:00 PM**
-7. At each trigger, also tries earlier times that may still be free
-8. Once booked → stops for the day, sleeps until tomorrow
-
-### Run it manually (foreground)
-
-```bash
-cd /Users/brandonvincent/Documents/personal/tennis-booker
-source .venv/bin/activate
-python scheduler.py
-```
-
-### Run in background (survives terminal close)
-
-```bash
-cd /Users/brandonvincent/Documents/personal/tennis-booker
-source .venv/bin/activate
-nohup python scheduler.py > scheduler_output.log 2>&1 &
-echo $!    # prints the PID — save this to stop it later
-```
-
-To stop it:
-```bash
-kill <PID>
-```
-
-### Test it right now (skip the wait)
-
-```bash
-python scheduler.py --test-now
-python scheduler.py --test-now --visible   # watch the browser
-```
-
-### Auto-start daily with macOS launchd
-
-This makes the scheduler start automatically at 5:50 PM every day,
-even after reboots:
-
-```bash
-# Install the launch agent
-cp com.tennisbooker.scheduler.plist ~/Library/LaunchAgents/
-
-# Load it
-launchctl load ~/Library/LaunchAgents/com.tennisbooker.scheduler.plist
-
-# Verify it's registered
-launchctl list | grep tennisbooker
-```
-
-To uninstall:
-```bash
-launchctl unload ~/Library/LaunchAgents/com.tennisbooker.scheduler.plist
-rm ~/Library/LaunchAgents/com.tennisbooker.scheduler.plist
-```
-
----
-
-## Option 2: Simple one-shot mode
-
-`book.py` is simpler — it logs in fresh, tries all preferred times, and exits.
-
-```bash
-# Single attempt
-python book.py
-
-# Loop every 30 min until booked
-python book.py --loop
-
-# Loop every 15 min
-python book.py --loop --interval 15
-
-# Show the browser
-python book.py --visible
-
-# Target a specific date
-python book.py --date 2026-02-13
-```
-
----
-
-## Option 3: Cron jobs (one per slot time)
-
-If you prefer cron over the scheduler daemon:
-
-```bash
-crontab -e
-```
-
-```
-# Snipe each slot at the exact time it opens
-0  18 * * * cd /Users/brandonvincent/Documents/personal/tennis-booker && .venv/bin/python book.py >> cron.log 2>&1
-30 18 * * * cd /Users/brandonvincent/Documents/personal/tennis-booker && .venv/bin/python book.py >> cron.log 2>&1
-0  19 * * * cd /Users/brandonvincent/Documents/personal/tennis-booker && .venv/bin/python book.py >> cron.log 2>&1
-30 19 * * * cd /Users/brandonvincent/Documents/personal/tennis-booker && .venv/bin/python book.py >> cron.log 2>&1
-0  20 * * * cd /Users/brandonvincent/Documents/personal/tennis-booker && .venv/bin/python book.py >> cron.log 2>&1
-30 20 * * * cd /Users/brandonvincent/Documents/personal/tennis-booker && .venv/bin/python book.py >> cron.log 2>&1
-0  21 * * * cd /Users/brandonvincent/Documents/personal/tennis-booker && .venv/bin/python book.py >> cron.log 2>&1
-```
-
-Note: cron has ~1-2 second startup delay, so `scheduler.py` is faster for competitive booking.
-
----
-
-## Adding Albert Park
-
-Right now only **Melbourne Park** (`clubId=3`) is configured. To add Albert Park:
-
-1. Open [tennisworld.perfectgym.com.au/ClientPortal2](https://tennisworld.perfectgym.com.au/ClientPortal2) in your browser
-2. Navigate to Albert Park's booking page
-3. Look at the URL — it will contain `clubId=X&zoneTypeId=Y`
-4. Edit `book.py` and uncomment/fill in the Albert Park entry in `CLUBS`:
-
-```python
-CLUBS = [
-    {"name": "Melbourne Park", "clubId": 3, "zoneTypeId": 32},
-    {"name": "Albert Park", "clubId": X, "zoneTypeId": Y},  # <-- fill these in
-]
-```
-
-## Logs & debugging
+## Files
 
 | File | Purpose |
 |---|---|
-| `scheduler.log` | Scheduler daemon log |
-| `booker.log` | book.py run log |
-| `scheduler_state.json` | Tracks daily booking state |
-| `booking_success.png` | Screenshot on successful booking |
-| `debug_*.png` | Screenshots at each step (for troubleshooting) |
+| `fly_main.py` | Entrypoint — Telegram long-poll + APScheduler + thread pool |
+| `Dockerfile`, `fly.toml`, `.dockerignore` | Fly.io image and config |
+| `settings.py` | All knobs — venues, time priorities, retry tuning |
+| `book.py` | One-shot booking. Spatial-matching Book-button detection |
+| `scheduler.py` | Multi-venue sniper session |
+| `cancel.py` | Playwright cancel by date/day + time |
+| `scan.py` | Scans all venues for free preferred slots |
+| `notify.py` | Telegram helper (no deps, stdlib HTTP) |
+| `daily_summary.py` | Scrapes My Bookings, sends Telegram digest |
+| `telegram_poller.py` | Dispatches `/cancel`, `/snipe`, etc. commands |
+| `process_command.py` | Single-command runner (used by legacy GH dispatch) |
+| `webhook/` | Old Vercel webhook (kept for reference; no longer used) |
+| `.github/workflows/*.yml` | Schedule-disabled fallback workflows |
+| `com.tennisbooker.*.plist` | macOS launchd agents (alternative to Fly) |
 
-- Run with `--visible` to watch the browser
-- Run with `--test-now` to skip waiting and test immediately
-- If a CAPTCHA appears on login, run with `--visible` and solve it manually
+## Local install
 
-## Configuration reference
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+```
 
-All config is at the top of each file:
+`.env`:
 
-**`book.py`**:
+```
+TW_EMAIL=...
+TW_PASSWORD=...
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+```
 
-| Variable | Default | Description |
-|---|---|---|
-| `CLUBS` | Melbourne Park | Venues to try (in order) |
-| `PREFERRED_TIMES` | 8:00 PM first | Time slots in priority order |
-| `ADVANCE_DAYS` | 5 | How many days ahead to book |
+### Useful local commands
 
-**`scheduler.py`**:
+```bash
+python fly_main.py                       # mimic Fly entrypoint locally
+python book.py --date 2026-05-29 --time 7pm
+python scheduler.py --test-now
+python cancel.py mon 8:30pm              # day-name form
+python cancel.py --next --dry-run
+python scan.py --no-telegram             # print results, don't ping
+python daily_summary.py --days 4         # today + next 3
+python notify.py "hello"                 # smoke-test Telegram
+```
 
-| Variable | Default | Description |
-|---|---|---|
-| `SNIPE_SCHEDULE` | 6:00–9:00 PM every 30 min | When to fire |
-| `SNIPE_RETRIES` | 8 | Rapid retries per slot opening |
-| `RETRY_GAP_S` | 3 | Seconds between retries |
-| `PRE_LOGIN_MINUTES` | 3 | Login this many min before first slot |
+## Logs
+
+| File | Purpose |
+|---|---|
+| `fly logs` | live Fly machine output |
+| `scheduler.log`, `booker.log` | local run logs |
+| `scheduler_state.json` | tracks today's booking state |
+| `booking_success.png`, `debug_*.png` | step-by-step screenshots |

@@ -1,0 +1,74 @@
+name: Opportunistic Scanner
+
+# ─── Triggers ────────────────────────────────────────────────────────────────
+# Looks for free preferred slots every 15 minutes during waking hours
+# (7 AM – 11 PM Melbourne).  If anything is found, sends a Telegram message
+# with tappable /snipe_<date>_<time> commands.
+#
+# Cron is UTC, so we run the same intervals year-round and the script
+# itself checks the local hour to stay quiet overnight.
+on:
+  # Schedules disabled — Fly.io is the live scheduler. Manual fallback only.
+  workflow_dispatch: {}
+
+# Don't pile up overlapping runs.
+concurrency:
+  group: tennis-scanner
+  cancel-in-progress: false
+
+env:
+  TZ: Australia/Melbourne
+  PLAYWRIGHT_BROWSERS_PATH: /home/runner/.cache/ms-playwright
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Skip if outside waking hours
+        id: gate
+        run: |
+          hour=$(date +%H)
+          if [ "$hour" -lt 7 ] || [ "$hour" -ge 23 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Local hour is $hour — skipping scan."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout code
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python packages
+        if: steps.gate.outputs.skip != 'true'
+        run: pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: /home/runner/.cache/ms-playwright
+          key: pw-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium + OS deps
+        if: steps.gate.outputs.skip != 'true'
+        run: playwright install --with-deps chromium
+
+      - name: Run scanner (silent if nothing found)
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          TW_EMAIL:             ${{ secrets.TW_EMAIL }}
+          TW_PASSWORD:          ${{ secrets.TW_PASSWORD }}
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scan.py --quiet

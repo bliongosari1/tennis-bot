@@ -1,0 +1,24 @@
+# Fly.io app: tennis-booker
+#
+# Single 1 GB always-on machine in Sydney (closest region to Melbourne).
+# Runs fly_main.py which long-polls Telegram + APScheduler cron + threaded
+# Playwright workers.
+
+app = "tennis-booker"
+primary_region = "syd"
+kill_signal = "SIGINT"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  TZ = "Australia/Melbourne"
+  PYTHONUNBUFFERED = "1"
+
+# No public HTTP endpoint — bot reaches out to Telegram via long-poll
+# and outbound HTTPS only.  No [http_service] block needed.
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

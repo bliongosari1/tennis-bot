@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.log
+*.png
+.env
+.vercel
+webhook
+node_modules
+scheduler_state.json
+launchd_*.log

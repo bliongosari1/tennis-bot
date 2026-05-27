@@ -1,14 +1,21 @@
 name: Tennis Court Sniper
 
 # ─── Triggers ────────────────────────────────────────────────────────────────
+#
+# GitHub cron is UTC.  Melbourne is AEDT (UTC+11, Oct–Apr) or AEST (UTC+10,
+# Apr–Oct).  To cover both seasons without rewriting the workflow twice a
+# year we list TWO cron entries (one per offset).  Only one fires "on time"
+# at any given month; the other fires ~1 hour off and the scheduler's
+# `--test-now` logic just sleeps a little longer.
+#
+# Day-of-week mapping (cron uses UTC day):
+#   Evenings: booking weekday slots Wed–Sun Melbourne  →  same UTC day
+#             (Wed=3, Thu=4, Fri=5, Sat=6, Sun=0)
+#   Mornings: booking weekend slots Mon/Tue Melbourne  →  PREVIOUS UTC day
+#             (Sun=0, Mon=1) because 8–9 AM Melb = 21–23 UTC the day before.
 on:
-  schedule:
-    # GitHub cron is UTC.  Melbourne = UTC+11 (AEDT, Oct–Apr) / UTC+10 (AEST).
-    # 6:45 AM UTC  =  5:45 PM AEDT  /  4:45 PM AEST
-    # Starts ~15 min early to absorb GitHub's cron delay (can be 3–15 min).
-    - cron: "45 6 * * *"
-
-  # Let you click "Run workflow" in the GitHub UI any time
+  # Schedules disabled — Fly.io (fly_main.py) is the live scheduler.
+  # Kept around for manual fallback via "Run workflow" if Fly is down.
   workflow_dispatch: {}
 
 # ─── Environment ─────────────────────────────────────────────────────────────
@@ -23,21 +30,18 @@ jobs:
     timeout-minutes: 240            # safety cap (session is ~3.5 hours max)
 
     steps:
-      # ── Checkout ──────────────────────────────────────────────────────
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ── Python ────────────────────────────────────────────────────────
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip                 # caches pip downloads between runs
+          cache: pip
 
       - name: Install Python packages
         run: pip install -r requirements.txt
 
-      # ── Playwright (cached) ──────────────────────────────────────────
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         id: pw-cache
@@ -48,19 +52,19 @@ jobs:
       - name: Install Playwright Chromium + OS deps
         run: playwright install --with-deps chromium
 
-      # ── Run the scheduler ────────────────────────────────────────────
       - name: Snipe tennis courts
         env:
-          TW_EMAIL:    ${{ secrets.TW_EMAIL }}
-          TW_PASSWORD: ${{ secrets.TW_PASSWORD }}
+          TW_EMAIL:             ${{ secrets.TW_EMAIL }}
+          TW_PASSWORD:          ${{ secrets.TW_PASSWORD }}
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scheduler.py --test-now
 
-      # ── Upload debug artifacts on failure ─────────────────────────────
       - name: Upload screenshots (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-screenshots
+          name: debug-screenshots-${{ github.run_id }}-${{ github.run_attempt }}
           path: "*.png"
           retention-days: 3
 
@@ -68,6 +72,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs
+          name: logs-${{ github.run_id }}-${{ github.run_attempt }}
           path: "*.log"
           retention-days: 7

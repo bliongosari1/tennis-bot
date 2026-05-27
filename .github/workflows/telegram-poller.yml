@@ -1,0 +1,58 @@
+name: Telegram Command Poller (fallback)
+
+# ─── Triggers ────────────────────────────────────────────────────────────────
+# DISABLED by default — the Vercel webhook → repository_dispatch path
+# (dispatch-telegram.yml) is the primary handler now.
+#
+# Telegram's getUpdates API returns a 409 Conflict when a webhook is set,
+# so this workflow only works after manually deleting the webhook:
+#     curl -F "url=" "https://api.telegram.org/bot<TOKEN>/setWebhook"
+# Keep this file for emergency fallback.
+on:
+  workflow_dispatch: {}
+
+# Avoid two pollers running at the same time (they'd both try to ack the
+# same updates).
+concurrency:
+  group: telegram-poller
+  cancel-in-progress: false
+
+env:
+  TZ: Australia/Melbourne
+  PLAYWRIGHT_BROWSERS_PATH: /home/runner/.cache/ms-playwright
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: /home/runner/.cache/ms-playwright
+          key: pw-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium + OS deps
+        run: playwright install --with-deps chromium
+
+      - name: Poll for Telegram commands
+        env:
+          TW_EMAIL:             ${{ secrets.TW_EMAIL }}
+          TW_PASSWORD:          ${{ secrets.TW_PASSWORD }}
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python telegram_poller.py

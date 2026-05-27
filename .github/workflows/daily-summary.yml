@@ -1,0 +1,60 @@
+name: Daily Tennis Summary
+
+# ─── Triggers ────────────────────────────────────────────────────────────────
+# Fires at 8:00 AM Melbourne time every day, and pings Telegram if there is
+# a booking on the calendar for today.
+#
+# 8 AM AEDT (Oct–Apr) = 21:00 UTC the previous day
+# 8 AM AEST (Apr–Oct) = 22:00 UTC the previous day
+on:
+  # Schedules disabled — Fly.io is the live scheduler. Manual fallback only.
+  workflow_dispatch: {}
+
+env:
+  TZ: Australia/Melbourne
+  PLAYWRIGHT_BROWSERS_PATH: /home/runner/.cache/ms-playwright
+
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: /home/runner/.cache/ms-playwright
+          key: pw-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium + OS deps
+        run: playwright install --with-deps chromium
+
+      # Sends every day: today's bookings highlighted, plus the next 3 days.
+      - name: Send daily summary to Telegram
+        env:
+          TW_EMAIL:             ${{ secrets.TW_EMAIL }}
+          TW_PASSWORD:          ${{ secrets.TW_PASSWORD }}
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python daily_summary.py --days 4
+
+      - name: Upload logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary-logs-${{ github.run_id }}
+          path: "*.log"
+          retention-days: 3

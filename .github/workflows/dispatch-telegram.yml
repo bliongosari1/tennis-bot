@@ -1,0 +1,62 @@
+name: Telegram Command (webhook-dispatched)
+
+# Fires when the Vercel webhook receives a Telegram command and calls
+# the GitHub API with `event_type: telegram_command`.  Payload shape:
+#   { command: "cancel", args: "fri_2000", chat_id: "-5213000412" }
+on:
+  repository_dispatch:
+    types: [telegram_command]
+
+# Concurrency lets multiple commands run in parallel without blocking.
+# Each command gets its own slot keyed on chat + command + args.
+concurrency:
+  group: "telegram-${{ github.event.client_payload.chat_id }}-${{ github.event.client_payload.command }}-${{ github.event.client_payload.args }}"
+  cancel-in-progress: false
+
+env:
+  TZ: Australia/Melbourne
+  PLAYWRIGHT_BROWSERS_PATH: /home/runner/.cache/ms-playwright
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: /home/runner/.cache/ms-playwright
+          key: pw-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium + OS deps
+        run: playwright install --with-deps chromium
+
+      - name: Run /${{ github.event.client_payload.command }}
+        env:
+          TW_EMAIL:             ${{ secrets.TW_EMAIL }}
+          TW_PASSWORD:          ${{ secrets.TW_PASSWORD }}
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_COMMAND:     ${{ github.event.client_payload.command }}
+          TELEGRAM_ARGS:        ${{ github.event.client_payload.args }}
+          # Reply chat — comes from the webhook payload (could be a different
+          # chat if you add the bot to more than one group later).
+          REPLY_CHAT_ID:        ${{ github.event.client_payload.chat_id }}
+        run: |
+          # Override TELEGRAM_CHAT_ID with the per-request reply chat.
+          export TELEGRAM_CHAT_ID="$REPLY_CHAT_ID"
+          python process_command.py
