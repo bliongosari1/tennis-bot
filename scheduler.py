@@ -2,17 +2,17 @@
 """
 Tennis World Booking Scheduler — Competitive Sniper
 ====================================================
-Runs as a long-lived daemon. Every day at 5:57 PM it wakes up,
-logs in, and then snipes each slot THE SECOND it opens.
+Runs as a long-lived daemon. Wakes up at the right time of day, logs in,
+then snipes each slot THE SECOND it opens.
 
 The booking window works like this:
-    A 6:00 PM slot 5 days from now becomes bookable at exactly 6:00 PM today.
-    A 6:30 PM slot 5 days from now becomes bookable at exactly 6:30 PM today.
-    ...
-    A 8:00 PM slot 5 days from now becomes bookable at exactly 8:00 PM today.
+    A slot 5 days from now becomes bookable at the same wall-clock time today.
+    A 7:00 PM slot 5 days from now becomes bookable at exactly 7:00 PM today.
+    A 11:00 AM Saturday slot becomes bookable at 11:00 AM the Monday before.
 
-So this scheduler fires at each half-hour from 6:00–9:00 PM,
-pre-logged-in and on the booking page, to grab the slot instantly.
+Day-of-week schedule:
+    Wed–Sun   → evening session  (7:00 → 9:00 PM)   (booking weekday slots)
+    Mon–Tue   → morning session  (10 / 11 / 12 PM)  (booking weekend slots)
 
 Usage:
     python scheduler.py                  # run as daemon (headless)
@@ -44,40 +44,55 @@ from book import (
     handle_booking_flow,
     _dismiss_modal,
     get_target_date,
+    enabled_clubs,
 )
+
+import settings as _S
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Scheduler configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Each entry: (hour_24, minute, display_string)
-# These are the times at which a slot 5 days out becomes bookable.
-SNIPE_SCHEDULE = [
-    (18, 0,  "06:00 PM"),
-    (18, 30, "06:30 PM"),
-    (19, 0,  "07:00 PM"),
-    (19, 30, "07:30 PM"),
-    (20, 0,  "08:00 PM"),   # ← preferred
-    (20, 30, "08:30 PM"),
-    (21, 0,  "09:00 PM"),
-]
+# Each entry: (hour_24, minute, display_string).
+# Built from settings.EVENING_TIMES / MORNING_TIMES so the user edits one
+# file and both the sniper schedule and the fallback list update together.
+def _to_schedule_entry(t):
+    parsed = datetime.strptime(t, "%I:%M %p")
+    return (parsed.hour, parsed.minute, t)
 
-# After sniping the newly-opened slot, also try these (earlier slots that
-# may still be free).  Ordered by preference.
-FALLBACK_TIMES = [
-    "08:00 PM", "08:30 PM", "07:30 PM", "07:00 PM",
-    "09:00 PM", "06:30 PM", "06:00 PM",
-]
 
-# How many rapid-fire retries per slot opening (every RETRY_GAP_S seconds)
-SNIPE_RETRIES = 8
-RETRY_GAP_S = 3
+EVENING_SCHEDULE = sorted(
+    [_to_schedule_entry(t) for t in _S.EVENING_TIMES],
+    key=lambda x: (x[0], x[1]),
+)
+MORNING_SCHEDULE = sorted(
+    [_to_schedule_entry(t) for t in _S.MORNING_TIMES],
+    key=lambda x: (x[0], x[1]),
+)
 
-# Log in this many minutes before the first slot of the evening
-PRE_LOGIN_MINUTES = 3
+# Fallback orderings (priority, not chronological).
+FALLBACK_EVENING = list(_S.EVENING_TIMES)
+FALLBACK_MORNING = list(_S.MORNING_TIMES)
 
-# How many seconds before the exact slot time to refresh the booking page
-PRE_REFRESH_S = 10
+
+def schedule_for_today(now=None):
+    """
+    Return (schedule, fallback_times, label) for today.
+
+    Mon (0) or Tue (1) → MORNING_SCHEDULE  (booking Sat/Sun respectively)
+    Anything else      → EVENING_SCHEDULE  (booking the next weekday slot)
+    """
+    now = now or datetime.now()
+    if now.weekday() in (0, 1):
+        return MORNING_SCHEDULE, FALLBACK_MORNING, "morning"
+    return EVENING_SCHEDULE, FALLBACK_EVENING, "evening"
+
+
+# Timing knobs come from settings.py.
+SNIPE_RETRIES = _S.SNIPE_RETRIES
+RETRY_GAP_S = _S.RETRY_GAP_S
+PRE_LOGIN_MINUTES = _S.PRE_LOGIN_MINUTES
+PRE_REFRESH_S = _S.PRE_REFRESH_S
 
 STATE_FILE = Path("scheduler_state.json")
 
@@ -150,19 +165,33 @@ def _sleep_precise(seconds):
 # Core snipe logic
 # ─────────────────────────────────────────────────────────────────────────────
 
-def snipe_one_slot(page, primary_time, target_date):
+def snipe_one_slot(page, primary_time, target_date, fallback_times, booked_clubs):
     """
     Attempt to book *primary_time* (just opened), then try fallback times.
-    Cycles through all configured zones for each club.
-    Returns (booked: bool, slot_str, club_name).
-    """
-    # Build ordered list: the newly-opened time first, then preference order
-    times_to_try = [primary_time] + [t for t in FALLBACK_TIMES if t != primary_time]
+    Cycles through all configured zones for each non-booked club.
 
-    for club in CLUBS:
-        zones = club.get("zones", [{"zoneTypeId": club.get("zoneTypeId", 32), "label": ""}])
+    Returns a list of {club, zone, time} dicts — one per booking made
+    (could be 0, 1, or 2 with two venues).  Skips clubs already in
+    *booked_clubs*.
+    """
+    times_to_try = [primary_time] + [
+        t for t in fallback_times if t != primary_time
+    ]
+    bookings = []
+
+    for club in enabled_clubs():
+        if club["name"] in booked_clubs:
+            continue
+
+        booked_here = False
+        zones = club.get(
+            "zones",
+            [{"zoneTypeId": club.get("zoneTypeId", 32), "label": ""}],
+        )
 
         for zone in zones:
+            if booked_here:
+                break
             zone_id = zone["zoneTypeId"]
             zone_label = zone.get("label", "")
 
@@ -175,25 +204,35 @@ def snipe_one_slot(page, primary_time, target_date):
                 result = handle_booking_flow(page)
 
                 if result == "success":
-                    tag = f" [{zone_label}]" if zone_label else ""
-                    return True, f"{t}{tag}", club["name"]
+                    bookings.append({
+                        "club": club["name"],
+                        "zone": zone_label,
+                        "time": t,
+                    })
+                    booked_here = True
+                    booked_clubs.add(club["name"])
+                    break
                 if result == "too_soon":
                     log.info(f"      {t} → too soon, trying next time")
                     continue
                 # error → try next time
                 continue
 
-    return False, None, None
+    return bookings
 
 
-def run_evening_session(page, target_date, headless):
+def run_session(page, target_date, schedule, fallback_times, headless):
     """
-    Covers one evening window (6–9 PM).  For each half-hour slot:
-      1.  Wait until the exact opening second.
-      2.  Rapid-fire snipe attempts.
-      3.  If booked → stop.
+    Run one session window.  For each (hour, minute, display) in *schedule*:
+      1. Wait until the exact opening second.
+      2. Rapid-fire snipe attempts.
+      3. Continue until every enabled venue has a booking on target_date.
     """
-    for hour, minute, display in SNIPE_SCHEDULE:
+    target_clubs = {c["name"] for c in enabled_clubs()}
+    booked_clubs: set[str] = set()
+    all_bookings: list[dict] = []
+
+    for hour, minute, display in schedule:
         if already_booked_today():
             log.info("Already booked today — stopping early.")
             return True
@@ -223,29 +262,71 @@ def run_evening_session(page, target_date, headless):
         log.info(f"  >>> SNIPING {display} <<<")
 
         for attempt in range(1, SNIPE_RETRIES + 1):
-            booked, slot_str, club_name = snipe_one_slot(page, display, target_date)
+            new = snipe_one_slot(
+                page, display, target_date, fallback_times, booked_clubs
+            )
+            for b in new:
+                log.info(
+                    f"  BOOKED! {b['time']} at {b['club']} "
+                    f"[{b['zone']}] for {target_date}"
+                )
+                all_bookings.append(b)
+                mark_booked_today(b["time"], b["club"], target_date)
+                try:
+                    from notify import notify_booking_success
+                    notify_booking_success(
+                        b["time"], b["club"], b["zone"], target_date
+                    )
+                except Exception as exc:
+                    log.warning(f"  Telegram notify failed: {exc}")
 
-            if booked:
-                log.info(f"  BOOKED! {slot_str} at {club_name} for {target_date}")
-                mark_booked_today(slot_str, club_name, target_date)
+            if booked_clubs >= target_clubs:
+                log.info("All enabled venues booked — done for today.")
                 try:
                     page.screenshot(path="booking_success.png")
                 except Exception:
                     pass
                 return True
 
-            if attempt < SNIPE_RETRIES:
+            if not new and attempt < SNIPE_RETRIES:
                 log.info(f"    Attempt {attempt}/{SNIPE_RETRIES} — retrying in {RETRY_GAP_S}s")
                 time.sleep(RETRY_GAP_S)
 
-        log.info(f"  Could not book at {display}, moving to next slot ...")
+        log.info(
+            f"  Slot {display} done. Booked so far: "
+            f"{sorted(booked_clubs) or 'none'}. "
+            f"Still trying: {sorted(target_clubs - booked_clubs) or 'none'}"
+        )
 
-    return False
+    return bool(all_bookings)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main daemon loop
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _next_session_pre_login(now):
+    """Return the next datetime we should wake up to pre-login for a session."""
+    # If today's session hasn't started, pre-login PRE_LOGIN_MINUTES before
+    # the first slot.  Otherwise sleep to tomorrow's pre-login time.
+    schedule, _, _ = schedule_for_today(now)
+    first_h, first_m, _ = schedule[0]
+    today_first = now.replace(
+        hour=first_h, minute=first_m, second=0, microsecond=0
+    )
+    pre_login = today_first - timedelta(minutes=PRE_LOGIN_MINUTES)
+    if now < pre_login:
+        return pre_login
+
+    # Today's session is past — find tomorrow's.
+    tomorrow_noon = (now + timedelta(days=1)).replace(
+        hour=12, minute=0, second=0, microsecond=0
+    )
+    sched_tomorrow, _, _ = schedule_for_today(tomorrow_noon)
+    h, m, _ = sched_tomorrow[0]
+    first_tomorrow = tomorrow_noon.replace(hour=h, minute=m)
+    return first_tomorrow - timedelta(minutes=PRE_LOGIN_MINUTES)
+
 
 def run_scheduler(headless=True, test_now=False):
     log.info("=" * 60)
@@ -257,44 +338,42 @@ def run_scheduler(headless=True, test_now=False):
 
     while True:
         now = datetime.now()
+        schedule, fallback_times, session_label = schedule_for_today(now)
+        log.info(
+            f"Today is {now.strftime('%A')} — using {session_label} session"
+        )
 
-        # ── Already booked today? Sleep until tomorrow. ─────────────────
+        # ── Already booked today? Sleep until next session's pre-login. ─
         if already_booked_today():
-            tomorrow = (now + timedelta(days=1)).replace(
-                hour=18 - PRE_LOGIN_MINUTES // 60,
-                minute=60 - PRE_LOGIN_MINUTES % 60 if PRE_LOGIN_MINUTES % 60 else 0,
-                second=0,
+            wake = _next_session_pre_login(now)
+            wait = (wake - now).total_seconds()
+            log.info(
+                f"Already booked today. Sleeping {wait / 3600:.1f}h until "
+                f"{wake.strftime('%a %H:%M')}"
             )
-            # Simpler: just sleep until tomorrow 5:57 PM
-            tomorrow = (now + timedelta(days=1)).replace(
-                hour=17, minute=57, second=0, microsecond=0
-            )
-            wait = (tomorrow - now).total_seconds()
-            log.info(f"Already booked today. Sleeping {wait / 3600:.1f}h until tomorrow 5:57 PM")
             time.sleep(max(wait, 60))
             continue
 
         # ── Determine when to wake up ───────────────────────────────────
         if test_now:
-            # Skip all waiting — useful for testing
             log.info("--test-now: skipping wait, running immediately")
         else:
-            first_slot_h, first_slot_m = SNIPE_SCHEDULE[0][0], SNIPE_SCHEDULE[0][1]
+            first_slot_h, first_slot_m = schedule[0][0], schedule[0][1]
             secs_to_first = _secs_until(first_slot_h, first_slot_m)
             login_lead = PRE_LOGIN_MINUTES * 60
 
+            # Window is long past (>3h ago) → sleep to next session
             if secs_to_first < -(60 * 60 * 3):
-                # Evening window is long past → sleep until tomorrow
-                tomorrow = (now + timedelta(days=1)).replace(
-                    hour=17, minute=57, second=0, microsecond=0
+                wake = _next_session_pre_login(now)
+                wait = (wake - now).total_seconds()
+                log.info(
+                    f"Session window passed. Sleeping {wait / 3600:.1f}h "
+                    f"until {wake.strftime('%a %H:%M')}"
                 )
-                wait = (tomorrow - now).total_seconds()
-                log.info(f"Evening window passed. Sleeping {wait / 3600:.1f}h until tomorrow")
                 time.sleep(max(wait, 60))
                 continue
 
             if secs_to_first > login_lead:
-                # Plenty of time — sleep until PRE_LOGIN_MINUTES before first slot
                 sleep_for = secs_to_first - login_lead
                 wake_time = now + timedelta(seconds=sleep_for)
                 log.info(
@@ -342,13 +421,20 @@ def run_scheduler(headless=True, test_now=False):
                     first_zone.get("label", ""),
                 )
 
-                # Run the evening session
-                booked = run_evening_session(page, target_date, headless)
+                # Run the session window
+                booked = run_session(
+                    page, target_date, schedule, fallback_times, headless
+                )
 
                 if booked:
                     log.info("Booking secured for today!")
                 else:
-                    log.info("No booking made this evening.")
+                    log.info("No booking made this session.")
+                    try:
+                        from notify import notify_session_no_booking
+                        notify_session_no_booking(session_label, target_date)
+                    except Exception as exc:
+                        log.warning(f"Telegram notify failed: {exc}")
 
                 browser.close()
 

@@ -2,8 +2,11 @@
 """
 Tennis World Auto-Booker
 ========================
-Automatically books tennis courts at Tennis World (Melbourne Park / Albert Park).
-Books 5 days in advance, targeting 6–9 PM slots (preferring 8 PM).
+Automatically books tennis courts at Tennis World (Melbourne Park first,
+Albert Reserve fallback).  Books 5 days in advance.
+
+Weekday targets (Mon–Fri):  7:00 PM → 9:00 PM   (preferring 8 PM)
+Weekend targets (Sat–Sun):  10 / 11 / 12 PM     (preferring 11 AM)
 
 Usage:
     python book.py                      # single attempt
@@ -40,17 +43,24 @@ BASE_URL = "https://tennisworld.perfectgym.com.au/ClientPortal2"
 LOGIN_URL = f"{BASE_URL}/#/Login"
 
 # Venues and court types to try, in priority order.
+# Melbourne Park is preferred — Albert Reserve is the fallback.
 #
-# HOW TO FIND THE IDs:
-#   1. Go to tennisworld.perfectgym.com.au  →  Court Bookings
-#   2. Pick the venue (e.g. Melbourne Park)
-#   3. Click the "Facility Type" dropdown and select a court type
-#   4. Look at the URL: ?clubId=X&zoneTypeId=Y
-#   5. Add an entry below with those values
-#
-# Only add the FREE court types (skip Show Court, Indoor, Physio).
+# IDs discovered by visiting each booking URL while logged in:
+#   https://tennisworld.perfectgym.com.au/ClientPortal2/#/FacilityBooking?clubId=X&zoneTypeId=Y
 CLUBS = [
-    # ── Albert Reserve (confirmed) ─────────────────────────────────────
+    # ── Melbourne Park (preferred) ──────────────────────────────────────
+    {
+        "name": "Melbourne Park",
+        "clubId": 2,
+        "zones": [
+            {"zoneTypeId": 1,  "label": "NTC Outdoor Courts"},
+            {"zoneTypeId": 27, "label": "Western Courts (Outdoor Full Court)"},
+            {"zoneTypeId": 28, "label": "Eastern Courts (Full Court)"},
+            {"zoneTypeId": 31, "label": "NTC Eastern Courts"},
+            # Excluded (paid): 26 Western Show Court, 30 NTC Indoor Courts
+        ],
+    },
+    # ── Albert Reserve (fallback) ───────────────────────────────────────
     {
         "name": "Albert Reserve",
         "clubId": 3,
@@ -58,36 +68,87 @@ CLUBS = [
             {"zoneTypeId": 32, "label": "Full court Albert Reserve"},
         ],
     },
-    # ── Melbourne Park ─────────────────────────────────────────────────
-    # TODO: Click "Change club" → Melbourne Park, then for each free
-    #       Facility Type, copy clubId & zoneTypeId from the URL.
-    #       Only add the FREE zones (skip Show Court, Indoor, Physio).
-    # {
-    #     "name": "Melbourne Park",
-    #     "clubId": ??,          # ← check URL after switching club
-    #     "zones": [
-    #         {"zoneTypeId": ??, "label": "Western Courts (Outdoor Full Court)"},
-    #         {"zoneTypeId": ??, "label": "Eastern Courts (Full Court)"},
-    #         {"zoneTypeId": ??, "label": "NTC Outdoor Courts"},
-    #         {"zoneTypeId": ??, "label": "NTC Eastern Courts"},
-    #     ],
-    # },
 ]
 
-# Slot times to try, in preference order (first match wins).
-# The page displays times as "HH:MM PM" with leading zeros.
-PREFERRED_TIMES = [
-    "08:00 PM",
-    "08:30 PM",
-    "07:30 PM",
-    "07:00 PM",
-    "09:00 PM",
-    "06:30 PM",
-    "06:00 PM",
-]
+# Time / window prefs come from settings.py so the user has one place to edit.
+import settings as _S
 
-# Booking window — slots open exactly this many days before the session date
-ADVANCE_DAYS = 5
+EVENING_TIMES = _S.EVENING_TIMES
+MORNING_TIMES = _S.MORNING_TIMES
+ADVANCE_DAYS = _S.ADVANCE_DAYS
+
+
+def preferred_times_for(target_date):
+    """
+    Return the time-slot priority list for a given target booking date.
+
+    Saturday/Sunday targets → morning slots (10/11/12).
+    Weekday targets         → evening slots (7–9 PM).
+    """
+    if isinstance(target_date, str):
+        target_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+    weekday = target_date.weekday()  # Mon=0 … Sun=6
+    if weekday in (5, 6):
+        return list(MORNING_TIMES)
+    return list(EVENING_TIMES)
+
+
+# Backwards-compat — old code expects PREFERRED_TIMES at module scope.
+PREFERRED_TIMES = EVENING_TIMES
+
+
+def enabled_clubs():
+    """Return CLUBS filtered to those enabled in settings.py, in settings order."""
+    enabled = _S.enabled_venue_names()
+    by_name = {c["name"]: c for c in CLUBS}
+    ordered = []
+    for v in _S.VENUES:
+        if v.get("enabled", True) and v["name"] in by_name:
+            ordered.append(by_name[v["name"]])
+    return ordered or CLUBS
+
+
+def _normalise_time(raw: str) -> str:
+    """
+    Accept human time formats and return the canonical 'HH:MM AM/PM' string
+    that the booking page uses.
+
+        '7pm'      → '07:00 PM'
+        '7:30pm'   → '07:30 PM'
+        '19:00'    → '07:00 PM'
+        '8:30am'   → '08:30 AM'
+        '08:30 AM' → '08:30 AM'
+        '0830'     → '08:30 AM'      (bare HHMM)
+        '2030'     → '08:30 PM'
+        '830'      → '08:30 AM'
+    """
+    s = raw.strip().upper().replace(" ", "")
+
+    # Bare HHMM (3 or 4 digits, no separator, no AM/PM).
+    m = re.match(r"^(\d{3,4})$", s)
+    if m:
+        digits = m.group(1).zfill(4)
+        h = int(digits[:2])
+        mi = int(digits[2:])
+        if 0 <= h < 24 and 0 <= mi < 60:
+            ampm = "PM" if h >= 12 else "AM"
+            h12 = h % 12 or 12
+            return f"{h12:02d}:{mi:02d} {ampm}"
+
+    m = re.match(r"^(\d{1,2})(?::(\d{2}))?(AM|PM)$", s)
+    if m:
+        h = int(m.group(1))
+        mi = int(m.group(2) or 0)
+        ampm = m.group(3)
+        return f"{h:02d}:{mi:02d} {ampm}"
+
+    m = re.match(r"^(\d{1,2}):(\d{2})$", s)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        ampm = "PM" if h >= 12 else "AM"
+        h12 = h % 12 or 12
+        return f"{h12:02d}:{mi:02d} {ampm}"
+    raise ValueError(f"Cannot parse time: {raw!r}")
 
 # Zone filtering — only book courts that are FREE with your membership.
 # Any facility type whose name contains one of these keywords is SKIPPED.
@@ -115,51 +176,74 @@ log.addHandler(_fh)
 # JavaScript helpers (injected into the page)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Walks the DOM to find a "Book now" button that belongs to a given time slot.
-# Marks it with a data attribute so Playwright can locate and click it properly.
+# Find the "Book now" button that belongs to a given time slot using
+# spatial matching — the Book button must be DIRECTLY BELOW the time
+# text and horizontally aligned with it.  Walking up the DOM is unreliable
+# because a row of cells (one per day) shares ancestors, so an unbookable
+# slot's time element can end up matched to a neighbour cell's Book button.
 JS_FIND_AND_MARK_SLOT = """
 (targetTime) => {
-    // Clear any previous markers
     document.querySelectorAll('[data-twbot]')
         .forEach(e => e.removeAttribute('data-twbot'));
 
-    // Find leaf-level elements whose own text content matches the target time
-    const walker = document.createTreeWalker(
-        document.body, NodeFilter.SHOW_ELEMENT
-    );
-    const timeHits = [];
+    // Collect every visible element whose direct text is the target time.
+    const timeBoxes = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
     while (walker.nextNode()) {
         const el = walker.currentNode;
-        // "own text" = concatenation of direct text-node children only
+        if (el.offsetParent === null) continue;
         const ownText = Array.from(el.childNodes)
             .filter(n => n.nodeType === 3)
             .map(n => n.textContent.trim())
-            .join(' ')
-            .trim();
-        if (ownText === targetTime && el.offsetParent !== null) {
-            timeHits.push(el);
+            .join(' ').trim();
+        if (ownText === targetTime) {
+            const r = el.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) {
+                timeBoxes.push({el, r});
+            }
         }
     }
+    if (timeBoxes.length === 0) return false;
 
-    // For each matching time element, walk up the DOM to find
-    // the nearest container that also holds a "Book now" button.
-    for (const hit of timeHits) {
-        let container = hit.parentElement;
-        for (let depth = 0; depth < 10 && container; depth++) {
-            const rect = container.getBoundingClientRect();
-            if (rect.height > 500) break;   // too large — probably the whole grid
+    // Collect every visible "Book now" button on the page.
+    const bookBoxes = [];
+    document.querySelectorAll('button, a, [role="button"], div, span')
+        .forEach(el => {
+            if (el.offsetParent === null) return;
+            const own = Array.from(el.childNodes)
+                .filter(n => n.nodeType === 3)
+                .map(n => n.textContent.trim())
+                .join(' ').trim();
+            if (own !== 'Book now') return;
+            const r = el.getBoundingClientRect();
+            if (r.width < 30 || r.height < 12) return;
+            bookBoxes.push({el, r});
+        });
+    if (bookBoxes.length === 0) return false;
 
-            const candidates = container.querySelectorAll(
-                'button, a, [role="button"], span, div'
-            );
-            for (const el of candidates) {
-                if (el.textContent.trim() === 'Book now'
-                    && el.offsetParent !== null) {
-                    el.setAttribute('data-twbot', '1');
-                    return true;
-                }
+    // For each time element, find the Book button that is BELOW it,
+    // horizontally overlapping (same cell), and closest in vertical distance.
+    // A real cell card is roughly 100–160 px tall — anything further is
+    // a different cell or the wrong row.
+    const MAX_DY = 160;
+
+    for (const {el: timeEl, r: tr} of timeBoxes) {
+        let best = null;
+        let bestDy = Infinity;
+        for (const {el: bookEl, r: br} of bookBoxes) {
+            const dy = br.top - tr.bottom;
+            if (dy < -10 || dy > MAX_DY) continue;
+            // Require horizontal overlap of at least 30% of the time element.
+            const overlap = Math.min(tr.right, br.right) - Math.max(tr.left, br.left);
+            if (overlap < tr.width * 0.3) continue;
+            if (dy < bestDy) {
+                bestDy = dy;
+                best = bookEl;
             }
-            container = container.parentElement;
+        }
+        if (best) {
+            best.setAttribute('data-twbot', '1');
+            return true;
         }
     }
     return false;
@@ -463,14 +547,31 @@ def _dismiss_modal(page):
 # Main booking attempt
 # ─────────────────────────────────────────────────────────────────────────────
 
-def attempt_booking(date_override=None, headless=True):
+def attempt_booking(
+    date_override=None,
+    headless=True,
+    times_override=None,
+    skip_clubs=None,
+):
     """
     Run one complete booking attempt.
-    Returns True if a court was successfully booked.
+
+    Args:
+        date_override:    explicit YYYY-MM-DD target (else today + ADVANCE_DAYS)
+        headless:         hide the browser window
+        times_override:   list of "HH:MM AM/PM" strings overriding the
+                          weekday-aware default list
+        skip_clubs:       set of club names already booked for this date —
+                          skip them so we move on to the next venue
+
+    Returns True if at least one booking was made this attempt.
     """
     date_str = get_target_date(date_override)
+    skip_clubs = set(skip_clubs or ())
     log.info("=" * 56)
     log.info(f"  BOOKING ATTEMPT  |  target date: {date_str}")
+    if skip_clubs:
+        log.info(f"  Skipping already-booked clubs: {sorted(skip_clubs)}")
     log.info("=" * 56)
 
     with sync_playwright() as pw:
@@ -496,13 +597,26 @@ def attempt_booking(date_override=None, headless=True):
                 return False
 
             too_soon_hit = False
+            slot_priorities = times_override or preferred_times_for(date_str)
+            log.info(
+                f"Time priorities for {date_str}: "
+                f"{', '.join(slot_priorities)}"
+            )
+            booked_any = False
+            booked_clubs = set(skip_clubs)
 
             # Step 2: Try each club → each zone → each time slot
-            for club in CLUBS:
+            for club in enabled_clubs():
+                if club["name"] in booked_clubs:
+                    log.info(f"  Skipping {club['name']} (already booked)")
+                    continue
                 if too_soon_hit:
                     break
 
-                zones = club.get("zones", [{"zoneTypeId": club.get("zoneTypeId", 32), "label": ""}])
+                zones = club.get(
+                    "zones",
+                    [{"zoneTypeId": club.get("zoneTypeId", 32), "label": ""}],
+                )
 
                 for zone in zones:
                     if too_soon_hit:
@@ -515,7 +629,7 @@ def attempt_booking(date_override=None, headless=True):
                         page, club["clubId"], zone_id, date_str, zone_label
                     )
 
-                    for slot_time in PREFERRED_TIMES:
+                    for slot_time in slot_priorities:
                         tag = f" [{zone_label}]" if zone_label else ""
                         log.info(f"  Trying {slot_time} at {club['name']}{tag} ...")
 
@@ -531,7 +645,18 @@ def attempt_booking(date_override=None, headless=True):
                                 f" on {date_str}"
                             )
                             page.screenshot(path="booking_success.png")
-                            return True
+                            try:
+                                from notify import notify_booking_success
+                                notify_booking_success(
+                                    slot_time, club["name"], zone_label, date_str
+                                )
+                            except Exception as exc:
+                                log.warning(f"  Telegram notify failed: {exc}")
+                            booked_clubs.add(club["name"])
+                            booked_any = True
+                            # Move on to the next venue — we don't double-book
+                            # the same venue on the same day.
+                            break
 
                         if result == "too_soon":
                             log.info("  Skipping remaining (window not open yet)")
@@ -541,8 +666,14 @@ def attempt_booking(date_override=None, headless=True):
                         # result == "error" → try next time slot
                         continue
 
-            log.info("No booking made this run.")
-            return False
+                    # If the inner loop broke out (success or too_soon),
+                    # we also break out of the zone loop.
+                    if club["name"] in booked_clubs or too_soon_hit:
+                        break
+
+            if not booked_any:
+                log.info("No booking made this run.")
+            return booked_any
 
         except Exception as exc:
             log.error(f"Unhandled error: {exc}", exc_info=True)
@@ -580,9 +711,20 @@ def main():
         "--date", type=str, default=None,
         help="Override target date (YYYY-MM-DD) instead of auto-calculating",
     )
+    parser.add_argument(
+        "--time", type=str, action="append", default=None,
+        help=(
+            "Override time priorities. May be repeated to give an ordered list. "
+            "Accepts '7pm', '7:30pm', '07:00 PM', '19:00', '08:30 AM', etc. "
+            "Example: --time 8:30am --time 7am"
+        ),
+    )
     args = parser.parse_args()
 
     headless = not args.visible
+    times_override = (
+        [_normalise_time(t) for t in args.time] if args.time else None
+    )
 
     if args.loop:
         log.info(f"Loop mode — retrying every {args.interval} min until booked")
@@ -590,13 +732,21 @@ def main():
         while True:
             attempt_num += 1
             log.info(f"--- Attempt #{attempt_num} ---")
-            if attempt_booking(date_override=args.date, headless=headless):
+            if attempt_booking(
+                date_override=args.date,
+                headless=headless,
+                times_override=times_override,
+            ):
                 log.info("Booking confirmed! Exiting loop.")
                 break
             log.info(f"Sleeping {args.interval} minutes before next attempt ...")
             time.sleep(args.interval * 60)
     else:
-        attempt_booking(date_override=args.date, headless=headless)
+        attempt_booking(
+            date_override=args.date,
+            headless=headless,
+            times_override=times_override,
+        )
 
 
 if __name__ == "__main__":

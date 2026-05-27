@@ -15,14 +15,53 @@
     <key>WorkingDirectory</key>
     <string>/Users/brandonvincent/Documents/personal/tennis-booker</string>
 
-    <!-- Run once a day at 5:50 PM (10 min before first slot) -->
+    <!--
+      Two daily fires so the daemon is awake before every booking window:
+        09:30 AM Mon/Tue → snipe Sat/Sun MORNING slots (10/11/12)
+        06:30 PM Wed–Sun → snipe weekday EVENING slots (7–9 PM)
+      Each entry just wakes the daemon; scheduler.py picks the right schedule
+      via schedule_for_today() based on the local day of week.
+    -->
     <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>17</integer>
-        <key>Minute</key>
-        <integer>50</integer>
-    </dict>
+    <array>
+        <!-- Morning runs: Mon=1, Tue=2 at 09:30 -->
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>2</integer>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <!-- Evening runs: Wed=3, Thu=4, Fri=5, Sat=6, Sun=0 at 18:30 -->
+        <dict>
+            <key>Weekday</key><integer>3</integer>
+            <key>Hour</key><integer>18</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>4</integer>
+            <key>Hour</key><integer>18</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>5</integer>
+            <key>Hour</key><integer>18</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>6</integer>
+            <key>Hour</key><integer>18</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>0</integer>
+            <key>Hour</key><integer>18</integer>
+            <key>Minute</key><integer>30</integer>
+        </dict>
+    </array>
 
     <key>StandardOutPath</key>
     <string>/Users/brandonvincent/Documents/personal/tennis-booker/launchd_stdout.log</string>
