@@ -380,8 +380,14 @@ def do_login(page):
     return True
 
 
-def open_booking_page(page, club_id, zone_type_id, date_str, label=""):
-    """Navigate to the facility-booking grid for a venue, zone, and date."""
+def open_booking_page(page, club_id, zone_type_id, date_str, label="", wait_ms=3000):
+    """
+    Navigate to the facility-booking grid for a venue, zone, and date.
+
+    wait_ms — extra wait AFTER networkidle for the grid to render.  Bookings
+    need the full 3000ms because we click immediately after; the scanner can
+    use a shorter wait since it only reads the rendered DOM.
+    """
     url = (
         f"{BASE_URL}/#/FacilityBooking"
         f"?clubId={club_id}&zoneTypeId={zone_type_id}"
@@ -390,7 +396,8 @@ def open_booking_page(page, club_id, zone_type_id, date_str, label=""):
     tag = f" [{label}]" if label else ""
     log.info(f"Opening bookings: clubId={club_id} zone={zone_type_id}{tag} on {date_str}")
     page.goto(url, wait_until="networkidle", timeout=30_000)
-    page.wait_for_timeout(3000)
+    if wait_ms > 0:
+        page.wait_for_timeout(wait_ms)
     log.info(f"  Page loaded (URL: {page.url})")
 
 

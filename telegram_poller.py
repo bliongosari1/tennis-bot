@@ -314,8 +314,30 @@ def cmd_snipe(chat_id: int, args: str) -> None:
 def cmd_scan(chat_id: int, _args: str) -> None:
     """Find free preferred slots in the next few days and report."""
     from scan import scan_and_message
-    reply(chat_id, "⏳ Scanning for free slots…")
-    fresh, message = scan_and_message(headless=True)
+    import settings as S
+    reply(
+        chat_id,
+        f"⏳ Scanning {S.SCAN_LOOKAHEAD_DAYS} days × all venues — about "
+        f"30 s per day on Fly, so ~{S.SCAN_LOOKAHEAD_DAYS * 30}s total. "
+        f"You'll see a tick per day as I go.",
+    )
+
+    # Edit the same status message after each date for a clean progress feel.
+    progress_seen = [0]
+    def on_progress(date_str, slots_so_far):
+        progress_seen[0] += 1
+        n = len(slots_so_far)
+        # Send a brief tick — only every other date to avoid spam.
+        if progress_seen[0] == S.SCAN_LOOKAHEAD_DAYS:
+            return  # final reply will cover this
+        d = datetime.strptime(date_str, "%Y-%m-%d").strftime("%a %d %b")
+        reply(
+            chat_id,
+            f"… {progress_seen[0]}/{S.SCAN_LOOKAHEAD_DAYS} done "
+            f"({d}) — {n} free slot(s) so far",
+        )
+
+    fresh, message = scan_and_message(headless=True, on_progress=on_progress)
     if message:
         reply(chat_id, message)
     else:

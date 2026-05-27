@@ -140,53 +140,45 @@ def _visible_times(page, preferred_times: list[str], target_date: str) -> list[s
     )
 
 
-def find_opportunities(headless: bool = True) -> list[dict]:
+def find_opportunities(
+    headless: bool = True,
+    on_progress=None,
+    page=None,
+) -> list[dict]:
     """
     Return a list of {date, time, club, zone, club_id, zone_id} dicts for
     every preferred slot that's currently free across the lookahead window.
+
+    on_progress(date_str, slots_so_far) — optional callback fired once per
+    date scanned, useful for streaming progress to Telegram.
+    page — already-logged-in Playwright page; pass to reuse a session and
+    skip a full re-login (saves ~10 s when called from scan_and_message).
     """
     out = []
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless)
-        ctx = browser.new_context(
-            viewport={"width": 1366, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
-            ),
-        )
-        page = ctx.new_page()
-        page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
-
-        if not do_login(page):
-            browser.close()
-            return []
-
+    def _run(p):
         today = datetime.now().date()
         dates = [
             (today + timedelta(days=i)).strftime("%Y-%m-%d")
             for i in range(S.SCAN_LOOKAHEAD_DAYS)
         ]
-
         for date_str in dates:
             preferred = preferred_times_for(date_str)
             for club in enabled_clubs():
                 for zone in club["zones"]:
                     try:
+                        # Short wait — we only read DOM, not click.
                         open_booking_page(
-                            page, club["clubId"], zone["zoneTypeId"],
+                            p, club["clubId"], zone["zoneTypeId"],
                             date_str, zone.get("label", ""),
+                            wait_ms=1200,
                         )
                     except Exception as exc:
                         log.warning(
                             f"  skip {club['name']}/{zone['label']}/{date_str}: {exc}"
                         )
                         continue
-                    free = _visible_times(page, preferred, date_str)
+                    free = _visible_times(p, preferred, date_str)
                     for tm in free:
                         out.append({
                             "date":     date_str,
@@ -196,8 +188,34 @@ def find_opportunities(headless: bool = True) -> list[dict]:
                             "zone":     zone.get("label", ""),
                             "zone_id":  zone["zoneTypeId"],
                         })
+            if on_progress:
+                try:
+                    on_progress(date_str, list(out))
+                except Exception as exc:
+                    log.warning(f"on_progress raised: {exc}")
 
-        browser.close()
+    if page is not None:
+        _run(page)
+    else:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=headless)
+            ctx = browser.new_context(
+                viewport={"width": 1366, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                ),
+            )
+            p = ctx.new_page()
+            p.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+            if not do_login(p):
+                browser.close()
+                return []
+            _run(p)
+            browser.close()
 
     # Sort by date then time priority within the day.
     def _sort_key(o):
@@ -273,15 +291,75 @@ def format_message(fresh: list[dict], header: str = "🎾 <b>Free slots availabl
     return "\n".join(lines)
 
 
-def scan_and_message(headless: bool = True) -> tuple[list[dict], str | None]:
+def scan_and_message(
+    headless: bool = True,
+    on_progress=None,
+) -> tuple[list[dict], str | None]:
     """
-    Run the full scan flow (login → scan → dedupe vs bookings) and return
-    (fresh_opps, message_or_None).
+    Run the full scan flow in ONE browser session (single login):
+      1. Log in.
+      2. Scan all (date × venue × zone) for free preferred slots.
+      3. Fetch My Bookings to dedupe vs existing.
+      4. Return (fresh_opps, message_or_None).
+
+    on_progress(date_str, slots_so_far) — fired once per date scanned.
     """
-    opps = find_opportunities(headless=headless)
-    log.info(f"Found {len(opps)} opportunity slot(s)")
-    bookings = fetch_bookings(headless=headless)
-    fresh = filter_fresh(opps, bookings)
+    out: list[dict] = []
+    bookings: list[dict] = []
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=headless)
+        ctx = browser.new_context(
+            viewport={"width": 1366, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+        )
+        page = ctx.new_page()
+        page.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+
+        if not do_login(page):
+            browser.close()
+            return [], None
+
+        # Scan using the already-logged-in page.
+        out = find_opportunities(
+            headless=headless, on_progress=on_progress, page=page,
+        )
+
+        # Fetch My Bookings in the same session to dedupe.
+        try:
+            page.goto(
+                f"{BASE_URL}/#/MyCalendar",
+                wait_until="networkidle",
+                timeout=20_000,
+            )
+            page.wait_for_timeout(1500)
+            body = page.evaluate("() => document.body.innerText")
+            if "Show past bookings" in body:
+                body = body.split("Show past bookings")[0]
+            from daily_summary import BOOKING_RE
+            for m in BOOKING_RE.finditer(body):
+                time_start, time_end, day, date_str, court, club = m.groups()
+                try:
+                    d = datetime.strptime(date_str.strip(), "%d/%m/%Y").date()
+                except ValueError:
+                    continue
+                bookings.append({
+                    "date": d.strftime("%Y-%m-%d"),
+                    "club": club.strip(),
+                })
+        except Exception as exc:
+            log.warning(f"could not fetch bookings for dedupe: {exc}")
+
+        browser.close()
+
+    log.info(f"Found {len(out)} opportunity slot(s)")
+    fresh = filter_fresh(out, bookings)
     log.info(f"After dedupe vs existing bookings: {len(fresh)} new opportunities")
     return fresh, format_message(fresh)
 
