@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tennisbooker.dailysummary</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/brandonvincent/Documents/personal/tennis-booker/.venv/bin/python</string>
+        <string>/Users/brandonvincent/Documents/personal/tennis-booker/daily_summary.py</string>
+        <string>--days</string>
+        <string>4</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/brandonvincent/Documents/personal/tennis-booker</string>
+
+    <!-- Daily at 8:00 AM Melbourne — pings Telegram if there's a booking today -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>8</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/brandonvincent/Documents/personal/tennis-booker/launchd_summary_stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/brandonvincent/Documents/personal/tennis-booker/launchd_summary_stderr.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
