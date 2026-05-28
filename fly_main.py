@@ -168,14 +168,30 @@ def _job_daily_summary():
 
 
 def _job_scanner():
+    import scanner_state
+    if not scanner_state.is_enabled():
+        log.info("[cron] scanner disabled (/scan_off), skipping")
+        return
     log.info("[cron] scanner starting")
     try:
         from scan import scan_and_message
         from notify import send
         fresh, message = scan_and_message(headless=True)
-        if message:
-            send(message)
-        # quiet when no slots — no message
+        if not message:
+            return  # quiet when no slots
+
+        # Dedupe: only ping if the set of fresh slots changed since last time.
+        sig = sorted(
+            [o["date"], o["time"], o["club"]] for o in fresh
+        )
+        if sig == scanner_state.last_signature():
+            log.info("[cron] same slots as last run, skipping notification")
+            return
+        scanner_state.set_last_signature(sig)
+
+        # Add a tappable off-switch so the user can stop the noise.
+        message += "\n\n<i>Quiet the auto-scanner: /scan_off</i>"
+        send(message)
     except Exception as exc:
         log.exception(f"[cron] scanner failed: {exc}")
 

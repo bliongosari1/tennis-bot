@@ -95,7 +95,10 @@ def cmd_help(chat_id: int, _args: str) -> None:
         "<b>See</b>\n"
         "/list — upcoming bookings (with cancel buttons)\n"
         "/summary — today + next 3 days\n"
-        "/scan — find free preferred slots in next 5 days\n"
+        "/scan — manual scan for free slots (next 5 days)\n"
+        "/scan_off — silence the auto-scanner\n"
+        "/scan_on — re-enable auto-scanner (15-min cron)\n"
+        "/scan_status — is auto-scanner on?\n"
         "/settings — show current config\n\n"
         "<b>Book</b>\n"
         "/snipe_today\n"
@@ -322,6 +325,40 @@ def cmd_scan(chat_id: int, _args: str) -> None:
         reply(chat_id, "🎾 No free preferred slots in your lookahead window.")
 
 
+def cmd_scan_off(chat_id: int, _args: str) -> None:
+    import scanner_state
+    scanner_state.set_enabled(False)
+    reply(
+        chat_id,
+        "🔕 <b>Auto-scanner off.</b>\n"
+        "Re-enable: /scan_on\n"
+        "Run once manually any time: /scan",
+    )
+
+
+def cmd_scan_on(chat_id: int, _args: str) -> None:
+    import scanner_state
+    scanner_state.set_enabled(True)
+    # Reset the dedupe signature so the next run definitely fires.
+    scanner_state.set_last_signature([])
+    reply(
+        chat_id,
+        "🔔 <b>Auto-scanner on.</b>\n"
+        "Runs every 15 min, 7 AM–11 PM Melb. "
+        "Only sends a message when the set of free slots changes.",
+    )
+
+
+def cmd_scan_status(chat_id: int, _args: str) -> None:
+    import scanner_state
+    state = "on 🔔" if scanner_state.is_enabled() else "off 🔕"
+    reply(
+        chat_id,
+        f"Auto-scanner is currently <b>{state}</b>.\n"
+        "Toggle with /scan_off or /scan_on.",
+    )
+
+
 def cmd_settings(chat_id: int, _args: str) -> None:
     import settings as S
     venues = ", ".join(
@@ -352,6 +389,23 @@ COMMANDS = {
     "scan":     cmd_scan,
     "settings": cmd_settings,
 }
+
+# Map underscore-prefixed commands separately so '/scan_off' is dispatched
+# as cmd_scan_off rather than being parsed as cmd_scan with args='off'.
+# The parser strips the bot suffix but otherwise sends '/scan_off' as
+# ('scan', 'off'); we add explicit aliases here.
+def _scan_subcmd(chat_id: int, args: str) -> None:
+    sub = (args or "").strip().lower()
+    if sub == "off":
+        return cmd_scan_off(chat_id, "")
+    if sub == "on":
+        return cmd_scan_on(chat_id, "")
+    if sub == "status":
+        return cmd_scan_status(chat_id, "")
+    return cmd_scan(chat_id, args)
+
+
+COMMANDS["scan"] = _scan_subcmd
 
 
 # ─── Main poll loop ──────────────────────────────────────────────────────────
